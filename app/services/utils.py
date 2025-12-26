@@ -1,26 +1,24 @@
+# app/services/utils.py
 import datetime as dt
 
 
-def parse_dt(s: str, default_time: str = "12:00") -> dt.datetime:
+def parse_dt(s: str) -> dt.datetime:
     """
     Принимает:
-      - "YYYY-MM-DD HH:MM"
-      - "YYYY-MM-DD"  -> подставит default_time (по умолчанию 12:00)
-
-    Бросает ValueError только если вообще не похоже на дату.
+      - 'YYYY-MM-DD HH:MM'
+      - 'YYYY-MM-DD'  (тогда ставим 12:00)
     """
     s = (s or "").strip()
+    if not s:
+        raise ValueError("Пустая дата")
 
-    # 1) Полный формат
-    try:
-        return dt.datetime.strptime(s, "%Y-%m-%d %H:%M")
-    except ValueError:
-        pass
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            d = dt.datetime.strptime(s, fmt)
+            if fmt == "%Y-%m-%d":
+                d = d.replace(hour=12, minute=0)
+            return d
+        except ValueError:
+            pass
 
-    # 2) Только дата -> добавляем время
-    try:
-        d = dt.datetime.strptime(s, "%Y-%m-%d").date()
-        hh, mm = default_time.split(":")
-        return dt.datetime(d.year, d.month, d.day, int(hh), int(mm))
-    except ValueError:
-        raise ValueError("Неверный формат. Нужно YYYY-MM-DD HH:MM или YYYY-MM-DD")
+    raise ValueError("Неверный формат даты. Нужно: YYYY-MM-DD HH:MM или YYYY-MM-DD")

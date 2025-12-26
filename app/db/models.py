@@ -14,9 +14,14 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    full_name: Mapped[str] = mapped_column(String(256), default="")
+
+    full_name: Mapped[str] = mapped_column(String(256), default="")        # из Telegram
+    display_name: Mapped[str] = mapped_column(String(128), default="")     # имя, которое ввёл пользователь
+    phone: Mapped[str] = mapped_column(String(32), default="")             # по желанию
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_subscribed: Mapped[bool] = mapped_column(Boolean, default=True)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.utcnow())
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.utcnow())
 

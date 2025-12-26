@@ -34,3 +34,22 @@ class AdminBroadcastAudienceCb(CallbackData, prefix="aud"):
 
 class AdminBroadcastPickEventCb(CallbackData, prefix="bpe"):
     event_id: int
+
+from aiogram.filters.callback_data import CallbackData
+
+
+class EventsListCb(CallbackData, prefix="evl"):
+    page: int
+
+
+class EventViewCb(CallbackData, prefix="evv"):
+    event_id: int
+
+
+class EventReactCb(CallbackData, prefix="evr"):
+    event_id: int
+    reaction: str  # interested / declined
+
+
+class EventIcsCb(CallbackData, prefix="evics"):
+    event_id: int

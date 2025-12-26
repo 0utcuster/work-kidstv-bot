@@ -14,7 +14,7 @@ from app.bot.keyboards.admin_kb import (
     admin_menu_kb, admin_events_kb, admin_event_actions_kb,
     admin_broadcasts_menu_kb, audience_kb
 )
-from app.bot.states import AdminCreateEvent, AdminEditEvent, AdminCreateBroadcast
+from app.bot.states import AdminCreateEvent, AdminEditEvent, AdminCreateBroadcast, AdminDangerConfirm
 
 from app.db.repos.events import (
     admin_list_events, get_event, set_event_status, delete_event,
@@ -29,9 +29,16 @@ from app.db.repos.broadcasts import (
     create_broadcast, list_broadcasts, set_broadcast_audience, set_broadcast_reminder_hours
 )
 
+from app.db.repos.events import (
+    list_event_media, append_event_media,
+    replace_event_media_by_index, delete_event_media_by_index
+)
+from app.bot.keyboards.admin_kb import admin_event_media_kb
+
 router = Router()
 
 MAX_MEDIA = 10  # Telegram media_group максимум 10
+DELETE_CONFIRM_WORD = "УДАЛИТЬ"
 
 
 def is_admin(user_id: int) -> bool:
@@ -96,7 +103,7 @@ async def add_event_start(c: CallbackQuery, state: FSMContext):
 async def add_event_title(m: Message, state: FSMContext):
     await state.update_data(title=m.text.strip())
     await state.set_state(AdminCreateEvent.starts_at)
-    await m.answer("Дата и время начала в формате YYYY-MM-DD HH:MM (например 2026-01-11 13:30):")
+    await m.answer("Дата и время начала: YYYY-MM-DD HH:MM (например 2026-01-11 13:30) или YYYY-MM-DD (будет 12:00).")
 
 
 @router.message(AdminCreateEvent.starts_at)
@@ -221,11 +228,12 @@ def build_event_caption_preview(data: dict) -> str:
     lines = [
         f"<b>{title}</b>",
         f"🕒 {starts_at}",
-        f"📍 {location}",
-        f"🖼 Медиа: {media_count}",
-        "",
-        description
     ]
+    if location:
+        lines.append(f"📍 {location}")
+    lines.append(f"🖼 Медиа: {media_count}")
+    if description:
+        lines += ["", description]
     if url:
         lines += ["", f"🔗 {url}"]
     return "\n".join(lines)
@@ -258,10 +266,24 @@ async def event_actions(c: CallbackQuery, callback_data: AdminEventActionCb, sta
         cap = await build_event_caption(ev.id)
         await smart_edit(c, "В архиве.\n\n" + cap, reply_markup=admin_event_actions_kb(ev.id, "archived"))
 
+
+    elif action == "media":
+        await state.clear()
+        await state.set_state(AdminEditEvent.media_menu)
+        await state.update_data(event_id=ev.id)
+        text = await _admin_media_text(ev.id)
+        await smart_edit(c, text, reply_markup=admin_event_media_kb(ev.id))
+
     elif action == "delete":
-        await delete_event(ev.id)
-        await audit_log(c.from_user.id, "event_delete", f"event_id={ev.id}")
-        await smart_edit(c, "Удалено.", reply_markup=admin_menu_kb())
+        # было: сразу удаление. стало: подтверждение словом
+        await state.clear()
+        await state.set_state(AdminDangerConfirm.delete_event)
+        await state.update_data(event_id=ev.id)
+        await c.message.answer(
+            f"Критическое действие.\n"
+            f"Чтобы удалить мероприятие #{ev.id}, введите слово: <b>{DELETE_CONFIRM_WORD}</b>\n"
+            "Чтобы отменить — напишите что угодно другое."
+        )
 
     elif action == "report":
         text = await reactions_report_text(ev.id)
@@ -275,6 +297,27 @@ async def event_actions(c: CallbackQuery, callback_data: AdminEventActionCb, sta
         await c.message.answer("Что редактируем? Напишите: title / starts_at / location / description / url")
 
     await c.answer()
+
+
+@router.message(AdminDangerConfirm.delete_event)
+async def danger_delete_confirm(m: Message, state: FSMContext):
+    """
+    Подтверждение удаления словом УДАЛИТЬ.
+    """
+    data = await state.get_data()
+    event_id = data.get("event_id")
+    txt = (m.text or "").strip()
+
+    if txt != DELETE_CONFIRM_WORD:
+        await state.clear()
+        return await m.answer("Отменено.", reply_markup=admin_menu_kb())
+
+    if event_id:
+        await delete_event(event_id)
+        await audit_log(m.from_user.id, "event_delete", f"event_id={event_id}")
+
+    await state.clear()
+    await m.answer("Удалено.", reply_markup=admin_menu_kb())
 
 
 @router.message(AdminEditEvent.choosing_field)
@@ -456,3 +499,177 @@ async def bc_confirm(m: Message, state: FSMContext):
 
     await m.answer(f"Создана рассылка #{b.id}. Запускаю...", reply_markup=admin_menu_kb())
     await BroadcastService.run_broadcast(broadcast_id=b.id, bot=m.bot)
+
+
+    MAX_MEDIA = 10
+
+
+async def _admin_media_text(event_id: int) -> str:
+    media = await list_event_media(event_id)
+    if not media:
+        return "Медиа пока нет.\n\nВыберите действие:"
+    lines = ["Медиа в мероприятии:"]
+    for i, (_id, mtype, _fid) in enumerate(media, start=1):
+        lines.append(f"{i}) {mtype}")
+    lines.append("")
+    lines.append("Выберите действие:")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("admin:media:add:"))
+async def admin_media_add_start(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа.", show_alert=True)
+
+    event_id = int(c.data.split(":")[-1])
+    await state.set_state(AdminEditEvent.media_add)
+    await state.update_data(event_id=event_id, media_buf=[])
+    await smart_edit(
+        c,
+        "Пришлите фото/документы (можно несколько). Когда закончите — напишите <b>готово</b>.\n"
+        f"Лимит на мероприятие: {MAX_MEDIA}.",
+        reply_markup=admin_event_media_kb(event_id),
+    )
+    await c.answer()
+
+
+@router.message(AdminEditEvent.media_add, F.photo)
+async def admin_media_add_photo(m: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = data["event_id"]
+    buf = data.get("media_buf") or []
+
+    # проверяем общий лимит
+    existing = await list_event_media(event_id)
+    if len(existing) + len(buf) >= MAX_MEDIA:
+        return await m.answer(f"Лимит {MAX_MEDIA} достигнут. Напишите <b>готово</b>.")
+
+    buf.append(("photo", m.photo[-1].file_id))
+    await state.update_data(media_buf=buf)
+    await m.answer(f"Добавлено ({len(buf)}). Ещё или <b>готово</b>.")
+
+
+@router.message(AdminEditEvent.media_add, F.document)
+async def admin_media_add_doc(m: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = data["event_id"]
+    buf = data.get("media_buf") or []
+
+    existing = await list_event_media(event_id)
+    if len(existing) + len(buf) >= MAX_MEDIA:
+        return await m.answer(f"Лимит {MAX_MEDIA} достигнут. Напишите <b>готово</b>.")
+
+    buf.append(("document", m.document.file_id))
+    await state.update_data(media_buf=buf)
+    await m.answer(f"Добавлено ({len(buf)}). Ещё или <b>готово</b>.")
+
+
+@router.message(AdminEditEvent.media_add, F.text.casefold() == "готово")
+async def admin_media_add_done(m: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = data["event_id"]
+    buf = data.get("media_buf") or []
+    if buf:
+        await append_event_media(event_id, buf)
+
+    await state.set_state(AdminEditEvent.media_menu)
+    await m.answer("Готово. Медиа обновлено.")
+    # показываем меню медиа как “один экран”
+    fake_cb = type("X", (), {"message": m, "from_user": m.from_user, "answer": m.answer})  # не нужен
+    await m.answer(await _admin_media_text(event_id), reply_markup=admin_event_media_kb(event_id))
+
+
+@router.callback_query(F.data.startswith("admin:media:replace:"))
+async def admin_media_replace_choose(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа.", show_alert=True)
+
+    event_id = int(c.data.split(":")[-1])
+    await state.set_state(AdminEditEvent.media_replace_choose)
+    await state.update_data(event_id=event_id)
+    await smart_edit(c, "Введите номер медиа для замены (1,2,3...):", reply_markup=admin_event_media_kb(event_id))
+    await c.answer()
+
+
+@router.message(AdminEditEvent.media_replace_choose)
+async def admin_media_replace_choose_num(m: Message, state: FSMContext):
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        return await m.answer("Нужно число (номер медиа).")
+
+    idx = int(txt)
+    data = await state.get_data()
+    event_id = data["event_id"]
+
+    media = await list_event_media(event_id)
+    if idx < 1 or idx > len(media):
+        return await m.answer(f"Неверный номер. Сейчас медиа: 1..{len(media)}")
+
+    await state.set_state(AdminEditEvent.media_replace_wait)
+    await state.update_data(replace_idx=idx)
+    await m.answer("Ок. Теперь пришлите новое фото/документ для замены.")
+
+
+@router.message(AdminEditEvent.media_replace_wait, F.photo)
+async def admin_media_replace_photo(m: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = data["event_id"]
+    idx = data["replace_idx"]
+
+    ok = await replace_event_media_by_index(event_id, idx, "photo", m.photo[-1].file_id)
+    await state.set_state(AdminEditEvent.media_menu)
+
+    if not ok:
+        return await m.answer("Не получилось заменить (номер не найден).")
+
+    await m.answer("Заменено ✅")
+    await m.answer(await _admin_media_text(event_id), reply_markup=admin_event_media_kb(event_id))
+
+
+@router.message(AdminEditEvent.media_replace_wait, F.document)
+async def admin_media_replace_doc(m: Message, state: FSMContext):
+    data = await state.get_data()
+    event_id = data["event_id"]
+    idx = data["replace_idx"]
+
+    ok = await replace_event_media_by_index(event_id, idx, "document", m.document.file_id)
+    await state.set_state(AdminEditEvent.media_menu)
+
+    if not ok:
+        return await m.answer("Не получилось заменить (номер не найден).")
+
+    await m.answer("Заменено ✅")
+    await m.answer(await _admin_media_text(event_id), reply_markup=admin_event_media_kb(event_id))
+
+
+@router.callback_query(F.data.startswith("admin:media:delete:"))
+async def admin_media_delete_choose(c: CallbackQuery, state: FSMContext):
+    if not is_admin(c.from_user.id):
+        return await c.answer("Нет доступа.", show_alert=True)
+
+    event_id = int(c.data.split(":")[-1])
+    await state.set_state(AdminEditEvent.media_delete_choose)
+    await state.update_data(event_id=event_id)
+    await smart_edit(c, "Введите номер медиа для удаления (1,2,3...):", reply_markup=admin_event_media_kb(event_id))
+    await c.answer()
+
+
+@router.message(AdminEditEvent.media_delete_choose)
+async def admin_media_delete_apply(m: Message, state: FSMContext):
+    txt = (m.text or "").strip()
+    if not txt.isdigit():
+        return await m.answer("Нужно число (номер медиа).")
+
+    idx = int(txt)
+    data = await state.get_data()
+    event_id = data["event_id"]
+
+    ok = await delete_event_media_by_index(event_id, idx)
+    await state.set_state(AdminEditEvent.media_menu)
+
+    if not ok:
+        media = await list_event_media(event_id)
+        return await m.answer(f"Неверный номер. Сейчас медиа: 1..{len(media)}")
+
+    await m.answer("Удалено ✅")
+    await m.answer(await _admin_media_text(event_id), reply_markup=admin_event_media_kb(event_id))

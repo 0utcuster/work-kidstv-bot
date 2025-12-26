@@ -1,65 +1,72 @@
-from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 from app.bot.callbacks import AdminMenuCb, AdminEventActionCb, AdminBroadcastActionCb, AdminBroadcastAudienceCb
 
 
-def admin_menu_kb() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="Мероприятия", callback_data=AdminMenuCb(section="events").pack())
-    b.button(text="Рассылки", callback_data=AdminMenuCb(section="broadcasts").pack())
-    b.button(text="Статистика", callback_data=AdminMenuCb(section="stats").pack())
-    b.adjust(1)
-    return b.as_markup()
+def admin_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📅 Мероприятия", callback_data=AdminMenuCb(section="events").pack())
+    kb.button(text="📣 Рассылки", callback_data=AdminMenuCb(section="broadcasts").pack())
+    kb.button(text="📊 Статистика", callback_data=AdminMenuCb(section="stats").pack())
+    kb.adjust(1)
+    return kb.as_markup()
 
 
-def admin_events_kb(events: list[tuple[int, str, str]]) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Добавить мероприятие", callback_data="admin:event:add")
+def admin_events_kb(events):
+    kb = InlineKeyboardBuilder()
+    # events ожидается: [(id, title, status), ...]
     for event_id, title, status in events:
-        b.button(text=f"{title[:28]} [{status}]", callback_data=AdminEventActionCb(event_id=event_id, action="view").pack())
-    b.adjust(1)
-    return b.as_markup()
+        kb.button(
+            text=f"#{event_id} {title} [{status}]",
+            callback_data=AdminEventActionCb(event_id=event_id, action="view").pack()
+        )
+    kb.button(text="➕ Добавить", callback_data="admin:event:add")
+    kb.button(text="⬅️ Назад", callback_data="admin:back")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
-def admin_event_actions_kb(event_id: int, status: str) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="👁 Просмотр", callback_data=AdminEventActionCb(event_id=event_id, action="view").pack())
-    b.button(text="📊 Отчёт (кто ответил)", callback_data=AdminEventActionCb(event_id=event_id, action="report").pack())
-    b.button(text="✏️ Редактировать", callback_data=AdminEventActionCb(event_id=event_id, action="edit").pack())
+def admin_event_actions_kb(event_id: int, status: str):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👀 Просмотр", callback_data=AdminEventActionCb(event_id=event_id, action="view").pack())
+    kb.button(text="📎 Медиа", callback_data=AdminEventActionCb(event_id=event_id, action="media").pack())
+    kb.button(text="📝 Редактировать поля", callback_data=AdminEventActionCb(event_id=event_id, action="edit").pack())
+    kb.button(text="📄 Отчёт", callback_data=AdminEventActionCb(event_id=event_id, action="report").pack())
 
     if status != "published":
-        b.button(text="✅ Опубликовать", callback_data=AdminEventActionCb(event_id=event_id, action="publish").pack())
+        kb.button(text="✅ Опубликовать", callback_data=AdminEventActionCb(event_id=event_id, action="publish").pack())
     if status != "archived":
-        b.button(text="🗄 В архив", callback_data=AdminEventActionCb(event_id=event_id, action="archive").pack())
+        kb.button(text="📦 В архив", callback_data=AdminEventActionCb(event_id=event_id, action="archive").pack())
 
-    b.button(text="🗑 Удалить", callback_data=AdminEventActionCb(event_id=event_id, action="delete").pack())
-    b.button(text="⬅️ Назад", callback_data=AdminMenuCb(section="events").pack())
-    b.adjust(2, 2, 1, 1)
-    return b.as_markup()
-
-
-def admin_broadcasts_menu_kb() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Создать рассылку", callback_data=AdminBroadcastActionCb(action="new").pack())
-    b.button(text="📃 Список рассылок", callback_data=AdminBroadcastActionCb(action="list").pack())
-    b.button(text="⬅️ Назад", callback_data="admin:back")
-    b.adjust(1)
-    return b.as_markup()
+    kb.button(text="🗑 Удалить", callback_data=AdminEventActionCb(event_id=event_id, action="delete").pack())
+    kb.button(text="⬅️ Назад к списку", callback_data=AdminMenuCb(section="events").pack())
+    kb.adjust(1)
+    return kb.as_markup()
 
 
-def audience_kb(selected: str | None = None) -> InlineKeyboardMarkup:
-    options = [
-        ("all", "Всем"),
-        ("subscribed", "Только подписанным"),
-        ("active", "Только активным"),
-        ("no_response", "Тем, кто не отвечал"),
-        ("ever_interested", "Тем, кто когда-либо интересовался"),
-    ]
-    b = InlineKeyboardBuilder()
-    for key, label in options:
-        mark = " ✅" if selected == key else ""
-        b.button(text=label + mark, callback_data=AdminBroadcastAudienceCb(audience=key).pack())
-    b.button(text="Далее", callback_data="admin:aud:next")
-    b.adjust(1)
-    return b.as_markup()
+def admin_event_media_kb(event_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить", callback_data=f"admin:media:add:{event_id}")
+    kb.button(text="♻️ Заменить №", callback_data=f"admin:media:replace:{event_id}")
+    kb.button(text="🗑 Удалить №", callback_data=f"admin:media:delete:{event_id}")
+    kb.button(text="⬅️ Назад", callback_data=AdminEventActionCb(event_id=event_id, action="view").pack())
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def admin_broadcasts_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Новая рассылка", callback_data=AdminBroadcastActionCb(action="new").pack())
+    kb.button(text="📃 Список", callback_data=AdminBroadcastActionCb(action="list").pack())
+    kb.button(text="⬅️ Назад", callback_data="admin:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def audience_kb(selected: str | None = None):
+    kb = InlineKeyboardBuilder()
+    for a in ["all", "subscribed", "active"]:
+        prefix = "✅ " if selected == a else ""
+        kb.button(text=f"{prefix}{a}", callback_data=AdminBroadcastAudienceCb(audience=a).pack())
+    kb.button(text="➡️ Далее", callback_data="admin:aud:next")
+    kb.adjust(1)
+    return kb.as_markup()
