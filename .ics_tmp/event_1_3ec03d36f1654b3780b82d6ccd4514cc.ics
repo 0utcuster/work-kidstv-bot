@@ -1,0 +1,13 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//tg-events-bot//EN
+BEGIN:VEVENT
+UID:1-c7124603-8371-4aab-804c-2eb60d401007@tg-events-bot
+DTSTAMP:20251226T151357Z
+DTSTART:20271212T120000
+DTEND:20271212T140000
+SUMMARY:Masks
+LOCATION:SPB
+DESCRIPTION:import datetime as dt\n\n\ndef parse_dt(s: str\, default_time: str = "12:00") -> dt.datetime:\n    """\n    Принимает:\n      - "YYYY-MM-DD HH:MM"\n      - "YYYY-MM-DD"  -> подставит default_time (по умолчанию 12:00)\n\n    Бросает ValueError только если вообще не похоже на дату.\n    """\n    s = (s or "").strip()\n\n    # 1) Полный формат\n    try:\n        return dt.datetime.strptime(s\, "%Y-%m-%d %H:%M")\n    except ValueError:\n        pass\n\n    # 2) Только дата -> добавляем время\n    try:\n        d = dt.datetime.strptime(s\, "%Y-%m-%d").date()\n        hh\, mm = default_time.split(":")\n        return dt.datetime(d.year\, d.month\, d.day\, int(hh)\, int(mm))\n    except ValueError:\n        raise ValueError("Неверный формат. Нужно YYYY-MM-DD HH:MM или YYYY-MM-DD")
+END:VEVENT
+END:VCALENDAR
