@@ -5,14 +5,22 @@ from aiogram.types import (
     InputMediaPhoto, InputMediaDocument
 )
 from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
 from app.bot.states import UserOnboarding
-from app.bot.keyboards.user_kb import main_menu_kb, events_list_kb, event_card_kb, settings_kb, BTN_UPCOMING, BTN_INTERESTS, BTN_SETTINGS
+from app.bot.keyboards.user_kb import (
+    main_menu_kb, events_list_kb, event_card_kb, settings_kb,
+    BTN_UPCOMING, BTN_INTERESTS, BTN_SETTINGS
+)
 from app.bot.callbacks import EventsListCb, EventViewCb, EventReactCb, EventIcsCb, EventMoreMediaCb
 from app.db.repos.users import upsert_user, set_subscribed, get_user_by_tg_id, set_profile, needs_onboarding
-from app.services.events import list_events, get_event_card, set_reaction, list_my_interests, list_event_media, build_caption_short_no_desc
+from app.services.events import (
+    list_events, get_event_card, set_reaction, list_my_interests,
+    list_event_media, build_caption_short_no_desc
+)
 from app.services.ics import build_ics_file
+
 from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.db.models import Event
@@ -20,6 +28,15 @@ from app.db.models import Event
 
 router = Router()
 _LAST_LIST_PAGE: dict[int, int] = {}
+
+SIGNUP_URL = "https://t.me/NikNadenka?text=%D0%97%D0%B4%D1%80%D0%B0%D0%B2%D1%81%D1%82%D0%B2%D1%83%D0%B9%D1%82%D0%B5%2C%20%D0%9D%D0%B0%D0%B4%D0%B5%D0%B6%D0%B4%D0%B0%21%20%D0%A5%D0%BE%D1%87%D1%83%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D0%B0%D1%82%D1%8C%D1%81%D1%8F%20%D0%BD%D0%B0%20%D1%83%D1%87%D0%B0%D1%81%D1%82%D0%B8%D0%B5%20%D0%B2%20%D0%BC%D0%B5%D1%80%D0%BE%D0%BF%D1%80%D0%B8%D1%8F%D1%82%D0%B8%D1%8F%D1%85%20%D0%B8%20%D1%83%D1%82%D0%BE%D1%87%D0%BD%D0%B8%D1%82%D1%8C%20%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F"
+
+
+def signup_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Записаться", url=SIGNUP_URL)
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def phone_request_kb() -> ReplyKeyboardMarkup:
@@ -46,7 +63,10 @@ async def start(m: Message, state: FSMContext):
     if await needs_onboarding(m.from_user.id):
         await state.clear()
         await state.set_state(UserOnboarding.name)
-        return await m.answer("Привет! Как к Вам обращаться? Напишите Ваше имя.", reply_markup=ReplyKeyboardRemove())
+        return await m.answer(
+            "Привет! Как к Вам обращаться? Напишите Ваше имя.",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
     await m.answer("Привет! Выберите действие:", reply_markup=main_menu_kb())
 
@@ -87,7 +107,6 @@ async def onboarding_phone_contact(m: Message, state: FSMContext):
 
 @router.message(UserOnboarding.phone)
 async def onboarding_phone_text_block(m: Message, state: FSMContext):
-    # Если пользователь пытается написать текстом или нажимает что-то не то
     await m.answer(
         "Пожалуйста, отправьте телефон кнопкой «📱 Отправить телефон».\n"
         "Telegram передаст номер корректно только через кнопку.",
@@ -105,7 +124,6 @@ async def upcoming(m: Message):
 
 @router.callback_query(F.data == "noop")
 async def noop(c: CallbackQuery):
-    # чтобы не было "not handled" на кнопке page/pages
     await c.answer()
 
 
@@ -128,7 +146,6 @@ async def view_event(c: CallbackQuery, callback_data: EventViewCb):
 
     kb = event_card_kb(event_id, has_more=has_more)
 
-    # Одно сообщение: 1-я афиша + кнопки (без второй афиши отдельно)
     if media:
         m0 = media[0]
         if m0.media_type == "photo":
@@ -150,7 +167,7 @@ async def show_more_media(c: CallbackQuery, callback_data: EventMoreMediaCb):
     if len(media) <= 1:
         return await c.answer("Больше афиш нет.", show_alert=True)
 
-    tail = media[1:11]  # до 10
+    tail = media[1:11]
 
     photos = [m for m in tail if m.media_type == "photo"]
     docs = [m for m in tail if m.media_type == "document"]
@@ -182,10 +199,24 @@ async def send_ics(c: CallbackQuery, callback_data: EventIcsCb):
 
 @router.callback_query(EventReactCb.filter())
 async def react(c: CallbackQuery, callback_data: EventReactCb):
-    await set_reaction(tg_user=c.from_user, event_id=callback_data.event_id, reaction=callback_data.reaction)
+    await set_reaction(
+        tg_user=c.from_user,
+        event_id=callback_data.event_id,
+        reaction=callback_data.reaction
+    )
 
-    # уведомление админа: БЕЗ описания мероприятия
     if callback_data.reaction == "interested":
+        info_text = (
+            "Условия участия и запись:\n"
+            "📲 8-905-214-6666, Надежда\n"
+            "💬 Telegram: @NikNadenka"
+        )
+        await c.message.answer(
+            info_text,
+            reply_markup=signup_kb(),
+            disable_web_page_preview=True
+        )
+
         u = await get_user_by_tg_id(c.from_user.id)
         display_name = ((u.display_name if u else "") or (c.from_user.full_name or "")).strip()
         phone = (u.phone if u else "") or ""
