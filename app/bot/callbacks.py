@@ -1,55 +1,40 @@
 from aiogram.filters.callback_data import CallbackData
 
 
-class EventsListCb(CallbackData, prefix="evl"):
-    page: int
-
-
-class EventViewCb(CallbackData, prefix="evv"):
-    event_id: int
-
-
-class EventReactCb(CallbackData, prefix="evr"):
-    event_id: int
-    reaction: str  # "interested" | "declined"
-
-
 class AdminMenuCb(CallbackData, prefix="adm"):
-    section: str  # "events" | "broadcasts" | "stats"
+    section: str
 
 
-class AdminEventActionCb(CallbackData, prefix="aea"):
+class AdminEventActionCb(CallbackData, prefix="adm_ev"):
     event_id: int
-    action: str  # "view" | "edit" | "delete" | "publish" | "archive" | "report"
+    action: str
 
 
-class AdminBroadcastActionCb(CallbackData, prefix="aba"):
-    action: str  # "new" | "run" | "list"
-    broadcast_id: int | None = None
+class AdminBroadcastActionCb(CallbackData, prefix="adm_bc"):
+    action: str
 
 
-class AdminBroadcastAudienceCb(CallbackData, prefix="aud"):
-    audience: str  # "all" | "subscribed" | "active" | "no_response" | "ever_interested"
+class AdminBroadcastAudienceCb(CallbackData, prefix="adm_aud"):
+    audience: str
 
 
-class AdminBroadcastPickEventCb(CallbackData, prefix="bpe"):
-    event_id: int
-
-from aiogram.filters.callback_data import CallbackData
-
-
-class EventsListCb(CallbackData, prefix="evl"):
+class EventsListCb(CallbackData, prefix="ev_list"):
     page: int
 
 
-class EventViewCb(CallbackData, prefix="evv"):
+class EventViewCb(CallbackData, prefix="ev_view"):
     event_id: int
 
 
-class EventReactCb(CallbackData, prefix="evr"):
+class EventReactCb(CallbackData, prefix="ev_react"):
     event_id: int
-    reaction: str  # interested / declined
+    reaction: str
 
 
-class EventIcsCb(CallbackData, prefix="evics"):
+# NEW: calendar + more media
+class EventIcsCb(CallbackData, prefix="ev_ics"):
+    event_id: int
+
+
+class EventMoreMediaCb(CallbackData, prefix="ev_more"):
     event_id: int

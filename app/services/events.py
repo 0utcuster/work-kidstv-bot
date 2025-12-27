@@ -1,13 +1,12 @@
 import datetime as dt
 from dataclasses import dataclass
 
-from aiogram.types import InputMediaPhoto, InputMediaDocument, User as TgUser
+from aiogram.types import User as TgUser
 from sqlalchemy import select, func
 
 from app.db.session import SessionLocal
 from app.db.models import Event, EventMedia, EventReaction, User
 from app.db.repos.users import upsert_user
-from app.services.utils import parse_dt
 
 
 @dataclass
@@ -15,10 +14,31 @@ class EventCard:
     caption: str
     poster_file_id: str | None
     poster_type: str | None
-    media_group: list | None
+    # IMPORTANT: media_group больше не используем для карточки,
+    # иначе будет дублирование (к media_group нельзя прикрепить клавиатуру)
+    media_group: list | None = None
 
 
 PAGE_SIZE = 8
+
+
+def _has_time(d: dt.datetime) -> bool:
+    # если админ ввёл только дату, мы сохраняем время 00:00 => считаем, что времени "нет"
+    return not (d.hour == 0 and d.minute == 0)
+
+
+def _fmt_when(d: dt.datetime) -> str:
+    # для карточки
+    if _has_time(d):
+        return d.strftime("%Y-%m-%d %H:%M")
+    return d.strftime("%Y-%m-%d")
+
+
+def _fmt_short(d: dt.datetime) -> str:
+    # для списков
+    if _has_time(d):
+        return d.strftime("%d.%m %H:%M")
+    return d.strftime("%d.%m")
 
 
 def _user_link_html(tg_id: int, username: str | None, display_name: str, fallback_full_name: str = "") -> str:
@@ -31,7 +51,7 @@ def _user_link_html(tg_id: int, username: str | None, display_name: str, fallbac
 def _build_caption(ev: Event) -> str:
     lines = [
         f"<b>{ev.title}</b>",
-        f"🕒 {ev.starts_at.strftime('%Y-%m-%d %H:%M')}",
+        f"🕒 {_fmt_when(ev.starts_at)}",
     ]
     if ev.location:
         lines.append(f"📍 {ev.location}")
@@ -39,6 +59,19 @@ def _build_caption(ev: Event) -> str:
         lines += ["", ev.description]
     if ev.url:
         lines += ["", f"🔗 {ev.url}"]
+    return "\n".join(lines)
+
+
+def build_caption_short_no_desc(ev: Event) -> str:
+    """Короткий caption без описания — для уведомлений админам."""
+    lines = [
+        f"<b>{ev.title}</b>",
+        f"🕒 {_fmt_when(ev.starts_at)}",
+    ]
+    if ev.location:
+        lines.append(f"📍 {ev.location}")
+    if ev.url:
+        lines.append(f"🔗 {ev.url}")
     return "\n".join(lines)
 
 
@@ -62,11 +95,29 @@ async def list_events(page: int = 1):
             .limit(PAGE_SIZE)
         )
         events = res.scalars().all()
-        items = [(e.id, f"{e.title} · {e.starts_at.strftime('%d.%m %H:%M')}") for e in events]
+
+        # тут скрываем время, если оно не задано
+        items = [(e.id, f"{e.title} · {_fmt_short(e.starts_at)}") for e in events]
         return items, page, pages
 
 
+async def list_event_media(event_id: int) -> list[EventMedia]:
+    async with SessionLocal() as s:
+        res = await s.execute(
+            select(EventMedia)
+            .where(EventMedia.event_id == event_id)
+            .order_by(EventMedia.id.asc())
+        )
+        return res.scalars().all()
+
+
 async def get_event_card(event_id: int) -> EventCard:
+    """
+    Карточка события — ВСЕГДА ОДНО сообщение:
+    - либо 1-е медиа (photo/document) + caption
+    - либо только caption
+    Остальные афиши пользователь получает по отдельной кнопке “Ещё афиши”.
+    """
     async with SessionLocal() as s:
         ev = (await s.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
         if not ev:
@@ -74,24 +125,15 @@ async def get_event_card(event_id: int) -> EventCard:
 
         media = (
             await s.execute(
-                select(EventMedia).where(EventMedia.event_id == event_id).order_by(EventMedia.id.asc())
+                select(EventMedia)
+                .where(EventMedia.event_id == event_id)
+                .order_by(EventMedia.id.asc())
             )
         ).scalars().all()
 
         caption = _build_caption(ev)
 
-        # Если есть 2+ медиа — делаем альбом (media_group). Telegram максимум 10.
-        if len(media) >= 2:
-            group = []
-            for i, m in enumerate(media[:10]):
-                if m.media_type == "document":
-                    group.append(InputMediaDocument(media=m.file_id, caption=caption if i == 0 else None))
-                else:
-                    group.append(InputMediaPhoto(media=m.file_id, caption=caption if i == 0 else None))
-            return EventCard(caption=caption, poster_file_id=None, poster_type=None, media_group=group)
-
-        # Одно медиа — отправим как одиночное
-        if len(media) == 1:
+        if media:
             m0 = media[0]
             return EventCard(caption=caption, poster_file_id=m0.file_id, poster_type=m0.media_type, media_group=None)
 
@@ -102,6 +144,15 @@ async def build_event_caption(event_id: int) -> str:
     async with SessionLocal() as s:
         ev = (await s.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
         return _build_caption(ev) if ev else "Не найдено."
+
+
+async def build_event_caption_brief(event_id: int) -> str:
+    """Коротко (без описания) по event_id."""
+    async with SessionLocal() as s:
+        ev = (await s.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+        if not ev:
+            return "Не найдено."
+        return build_caption_short_no_desc(ev)
 
 
 async def set_reaction(tg_user: TgUser, event_id: int, reaction: str) -> None:
@@ -140,7 +191,9 @@ async def list_my_interests(tg_id: int) -> list[str]:
             .order_by(Event.starts_at.asc())
         )
         rows = res.all()
-        return [f"{t} · {d.strftime('%d.%m %H:%M')}" for t, d in rows]
+
+        # тут тоже скрываем время, если оно не задано
+        return [f"{t} · {_fmt_short(d)}" for t, d in rows]
 
 
 async def reactions_report_text(event_id: int) -> str:
@@ -211,23 +264,3 @@ async def get_event_for_ics(event_id: int) -> dict | None:
             "description": ev.description,
             "url": ev.url,
         }
-    
-from sqlalchemy import select
-from app.db.session import SessionLocal
-from app.db.models import Event
-
-
-async def build_event_caption_brief(event_id: int) -> str:
-    async with SessionLocal() as s:
-        ev = (await s.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
-        if not ev:
-            return "Не найдено."
-
-        lines = [
-            f"<b>{ev.title}</b>",
-            f"🕒 {ev.starts_at.strftime('%Y-%m-%d %H:%M')}",
-            f"📍 {ev.location}",
-        ]
-        if ev.url:
-            lines += ["", f"🔗 {ev.url}"]
-        return "\n".join(lines)

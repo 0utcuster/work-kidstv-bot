@@ -1,0 +1,10 @@
+services:
+  kidstv-bot:
+    build: .
+    container_name: kidstv-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot.db:/app/bot.db
+      - ./.ics_tmp:/app/.ics_tmp

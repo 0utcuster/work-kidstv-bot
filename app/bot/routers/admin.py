@@ -387,6 +387,9 @@ async def bc_kind(m: Message, state: FSMContext):
         await state.set_state(AdminCreateBroadcast.custom_text)
         await m.answer("Введите текст рассылки:")
 
+from app.services.broadcast import BroadcastService, AUDIENCE_EXPLAIN
+from app.bot.keyboards.admin_kb import audience_kb
+
 
 @router.message(AdminCreateBroadcast.pick_event)
 async def bc_pick_event(m: Message, state: FSMContext):
@@ -394,7 +397,49 @@ async def bc_pick_event(m: Message, state: FSMContext):
         return await m.answer("Нужно число event_id.")
     await state.update_data(event_id=int(m.text.strip()))
     await state.set_state(AdminCreateBroadcast.audience)
-    await m.answer("Выберите аудиторию:", reply_markup=audience_kb())
+
+    # превью по умолчанию: all
+    count = await BroadcastService.count_recipients(kind="event", audience="all", event_id=int(m.text.strip()))
+    expl = (
+        "Статусы аудитории:\n"
+        f"• all — {AUDIENCE_EXPLAIN['all']}\n"
+        f"• subscribed — {AUDIENCE_EXPLAIN['subscribed']}\n"
+        f"• ever_interested — {AUDIENCE_EXPLAIN['ever_interested']}\n"
+        f"• no_response — {AUDIENCE_EXPLAIN['no_response']}\n"
+    )
+    await m.answer(
+        f"Выберите аудиторию.\n\nСейчас (all) получат: <b>{count}</b>\n\n{expl}",
+        reply_markup=audience_kb(selected="all"),
+    )
+
+
+@router.callback_query(AdminBroadcastAudienceCb.filter())
+async def bc_audience_select(c: CallbackQuery, callback_data: AdminBroadcastAudienceCb, state: FSMContext):
+    await state.update_data(audience=callback_data.audience)
+
+    data = await state.get_data()
+    kind = data.get("kind")
+    event_id = data.get("event_id")
+
+    count = await BroadcastService.count_recipients(kind=kind, audience=callback_data.audience, event_id=event_id)
+    expl = AUDIENCE_EXPLAIN.get(callback_data.audience, callback_data.audience)
+
+    await c.message.edit_reply_markup(reply_markup=audience_kb(selected=callback_data.audience))
+    await c.message.answer(f"Выбрано: <b>{callback_data.audience}</b>\n{expl}\nПолучат: <b>{count}</b>")
+    await c.answer()
+
+
+@router.callback_query(F.data == "admin:aud:next")
+async def bc_audience_next(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("audience"):
+        return await c.answer("Сначала выберите аудиторию.", show_alert=True)
+
+    await state.set_state(AdminCreateBroadcast.reminder_hours)
+    await c.message.answer(
+        f"Напоминание тем, кто не ответил: через сколько часов? (число). По умолчанию {settings.REMINDER_HOURS}"
+    )
+    await c.answer()
 
 
 @router.message(AdminCreateBroadcast.custom_text)
@@ -425,11 +470,7 @@ async def bc_custom_media_doc(m: Message, state: FSMContext):
     await m.answer("Выберите аудиторию:", reply_markup=audience_kb())
 
 
-@router.callback_query(AdminBroadcastAudienceCb.filter())
-async def bc_audience_select(c: CallbackQuery, callback_data: AdminBroadcastAudienceCb, state: FSMContext):
-    await state.update_data(audience=callback_data.audience)
-    await c.message.edit_reply_markup(reply_markup=audience_kb(selected=callback_data.audience))
-    await c.answer()
+
 
 
 @router.callback_query(F.data == "admin:aud:next")

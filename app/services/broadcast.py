@@ -3,21 +3,28 @@ import datetime as dt
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
-from aiogram.types import InputMediaPhoto, InputMediaDocument
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 
 from app.config import settings
 from app.db.session import SessionLocal
-from app.db.models import (
-    Broadcast, User, Event, EventMedia, BroadcastRecipient, EventReaction
-)
+from app.db.models import Broadcast, User, Event, EventMedia, BroadcastRecipient, EventReaction
 from app.db.repos.broadcasts import get_broadcast, set_broadcast_status
 from app.db.repos.users import set_user_active
 from app.db.repos.audit import audit_log
 from app.services.reminders import Reminders
 from app.services.events import _build_caption
 from app.bot.keyboards.user_kb import event_card_kb
+from app.services.events import list_event_media
+
+
+AUDIENCE_EXPLAIN = {
+    "all": "Все активные пользователи бота (is_active=True).",
+    "active": "То же самое, что all (оставлено на будущее для доп. фильтров).",
+    "subscribed": "Только подписанные на рассылки (is_subscribed=True).",
+    "ever_interested": "Пользователи, которые когда-либо нажимали «Интересно» на любых мероприятиях.",
+    "no_response": "Только для рассылки по событию: активные, кто ещё НЕ реагировал на это событие.",
+}
 
 
 class BroadcastService:
@@ -31,7 +38,7 @@ class BroadcastService:
         await audit_log(b.created_by_admin_tg_id, "broadcast_run", f"broadcast_id={broadcast_id}")
 
         recipients = await BroadcastService._select_recipients(b)
-        delay = 1.0 / max(1, settings.BROADCAST_RPS)
+        total = len(recipients)
 
         # записываем recipients в таблицу
         async with SessionLocal() as s:
@@ -39,13 +46,40 @@ class BroadcastService:
                 s.add(BroadcastRecipient(broadcast_id=broadcast_id, user_id=uid, status="pending"))
             await s.commit()
 
+        sent_ok = 0
+        failed = 0
+        delay = 1.0 / max(1, settings.BROADCAST_RPS)
+
         for user_id in recipients:
-            await BroadcastService._send_to_user(bot, b, user_id)
+            ok = await BroadcastService._send_to_user(bot, b, user_id)
+            if ok:
+                sent_ok += 1
+            else:
+                failed += 1
             await asyncio.sleep(delay)
 
         await set_broadcast_status(broadcast_id, "done", finished_at=dt.datetime.utcnow())
 
-        # напоминание тем, кто не ответил (только для kind=event)
+        # итог админу: сколько отправлено
+        try:
+            expl = AUDIENCE_EXPLAIN.get(b.audience, b.audience)
+            await bot.send_message(
+                b.created_by_admin_tg_id,
+                (
+                    f"✅ <b>Рассылка завершена</b>\n"
+                    f"• broadcast_id: {b.id}\n"
+                    f"• kind: {b.kind}\n"
+                    f"• audience: {b.audience} — {expl}\n"
+                    f"• всего получателей: {total}\n"
+                    f"• отправлено: {sent_ok}\n"
+                    f"• ошибок: {failed}"
+                ),
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+        # планируем напоминание тем, кто не ответил (только для kind=event)
         if b.kind == "event" and b.event_id:
             run_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=b.reminder_hours)
             job_id = f"rem_{broadcast_id}"
@@ -66,10 +100,7 @@ class BroadcastService:
             async with SessionLocal() as s:
                 await s.execute(
                     update(BroadcastRecipient)
-                    .where(
-                        BroadcastRecipient.broadcast_id == b.id,
-                        BroadcastRecipient.user_id == user_id
-                    )
+                    .where(BroadcastRecipient.broadcast_id == b.id, BroadcastRecipient.user_id == user_id)
                     .values(status="sent", sent_at=dt.datetime.utcnow(), error=None)
                 )
                 await s.commit()
@@ -80,10 +111,7 @@ class BroadcastService:
             async with SessionLocal() as s:
                 await s.execute(
                     update(BroadcastRecipient)
-                    .where(
-                        BroadcastRecipient.broadcast_id == b.id,
-                        BroadcastRecipient.user_id == user_id
-                    )
+                    .where(BroadcastRecipient.broadcast_id == b.id, BroadcastRecipient.user_id == user_id)
                     .values(status="failed", error="forbidden")
                 )
                 await s.commit()
@@ -97,10 +125,7 @@ class BroadcastService:
             async with SessionLocal() as s:
                 await s.execute(
                     update(BroadcastRecipient)
-                    .where(
-                        BroadcastRecipient.broadcast_id == b.id,
-                        BroadcastRecipient.user_id == user_id
-                    )
+                    .where(BroadcastRecipient.broadcast_id == b.id, BroadcastRecipient.user_id == user_id)
                     .values(status="failed", error=str(e))
                 )
                 await s.commit()
@@ -110,10 +135,7 @@ class BroadcastService:
             async with SessionLocal() as s:
                 await s.execute(
                     update(BroadcastRecipient)
-                    .where(
-                        BroadcastRecipient.broadcast_id == b.id,
-                        BroadcastRecipient.user_id == user_id
-                    )
+                    .where(BroadcastRecipient.broadcast_id == b.id, BroadcastRecipient.user_id == user_id)
                     .values(status="failed", error=repr(e))
                 )
                 await s.commit()
@@ -121,90 +143,25 @@ class BroadcastService:
 
     @staticmethod
     async def _send_event(bot: Bot, tg_id: int, event_id: int):
-        """
-        Отправка карточки мероприятия в рассылке С КНОПКАМИ:
-        - если 2+ фото: 1-е фото = caption + кнопки, остальные фото уходят альбомом/одним фото (без caption)
-        - если 1 фото: фото = caption + кнопки
-        - если документ: документ = caption + кнопки (и остальные доки без caption)
-        - если без медиа: текст = caption + кнопки
-        """
         async with SessionLocal() as s:
             ev = (await s.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
-            media = (
-                await s.execute(
-                    select(EventMedia)
-                    .where(EventMedia.event_id == event_id)
-                    .order_by(EventMedia.id.asc())
-                )
-            ).scalars().all()
-
         if not ev:
             return await bot.send_message(tg_id, "Мероприятие не найдено.")
 
         caption = _build_caption(ev)
-        kb = event_card_kb(event_id)
 
-        # 2+ фото
-        if len(media) >= 2 and all(m.media_type == "photo" for m in media):
-            first = media[0]
-            rest = media[1:10]  # всего максимум 10 вложений, но первое отправляем отдельно
+        media = await list_event_media(event_id)
+        has_more = len(media) >= 2
+        kb = event_card_kb(event_id, has_more=has_more)
 
-            # 1) главное фото с caption + кнопки
-            await bot.send_photo(
-                tg_id,
-                photo=first.file_id,
-                caption=caption,
-                reply_markup=kb
-            )
-
-            # 2) остальные фото
-            if len(rest) >= 2:
-                group = [InputMediaPhoto(media=m.file_id) for m in rest[:9]]
-                await bot.send_media_group(tg_id, media=group)
-            elif len(rest) == 1:
-                await bot.send_photo(tg_id, photo=rest[0].file_id)
-
-            return
-
-        # 1 медиа
-        if len(media) == 1:
+        # ВАЖНО: “одно сообщение” с кнопками (иначе альбом без клавиатуры)
+        if media:
             m0 = media[0]
             if m0.media_type == "photo":
                 return await bot.send_photo(tg_id, photo=m0.file_id, caption=caption, reply_markup=kb)
             if m0.media_type == "document":
                 return await bot.send_document(tg_id, document=m0.file_id, caption=caption, reply_markup=kb)
 
-        # смешанные медиа или много документов: отправим первое как “главное” с кнопками, остальное без подписи
-        if len(media) >= 2:
-            main = media[0]
-            tail = media[1:10]
-
-            if main.media_type == "photo":
-                await bot.send_photo(tg_id, photo=main.file_id, caption=caption, reply_markup=kb)
-            elif main.media_type == "document":
-                await bot.send_document(tg_id, document=main.file_id, caption=caption, reply_markup=kb)
-            else:
-                await bot.send_message(tg_id, caption, reply_markup=kb)
-
-            # хвост
-            photos_tail = [m for m in tail if m.media_type == "photo"]
-            docs_tail = [m for m in tail if m.media_type == "document"]
-
-            if len(photos_tail) >= 2:
-                group = [InputMediaPhoto(media=m.file_id) for m in photos_tail[:10]]
-                await bot.send_media_group(tg_id, media=group)
-            elif len(photos_tail) == 1:
-                await bot.send_photo(tg_id, photo=photos_tail[0].file_id)
-
-            if len(docs_tail) >= 2:
-                group = [InputMediaDocument(media=m.file_id) for m in docs_tail[:10]]
-                await bot.send_media_group(tg_id, media=group)
-            elif len(docs_tail) == 1:
-                await bot.send_document(tg_id, document=docs_tail[0].file_id)
-
-            return
-
-        # вообще без медиа
         return await bot.send_message(tg_id, caption, reply_markup=kb)
 
     @staticmethod
@@ -222,9 +179,7 @@ class BroadcastService:
 
             if b.audience == "subscribed":
                 base = base.where(User.is_subscribed == True)
-            elif b.audience == "active":
-                pass
-            elif b.audience == "all":
+            elif b.audience in {"active", "all"}:
                 pass
             elif b.audience == "ever_interested":
                 base = base.join(EventReaction, EventReaction.user_id == User.id).where(EventReaction.reaction == "interested")
@@ -236,37 +191,47 @@ class BroadcastService:
             return [r[0] for r in res.all()]
 
     @staticmethod
+    async def count_recipients(kind: str, audience: str, event_id: int | None) -> int:
+        # для превью в админке: сколько пользователей попадёт
+        async with SessionLocal() as s:
+            q = select(func.count(func.distinct(User.id))).where(User.is_active == True)
+
+            if audience == "subscribed":
+                q = q.where(User.is_subscribed == True)
+            elif audience in {"active", "all"}:
+                pass
+            elif audience == "ever_interested":
+                q = q.join(EventReaction, EventReaction.user_id == User.id).where(EventReaction.reaction == "interested")
+            elif audience == "no_response" and kind == "event" and event_id:
+                reacted = select(EventReaction.user_id).where(EventReaction.event_id == event_id)
+                q = q.where(User.id.not_in(reacted))
+
+            return int((await s.execute(q)).scalar_one())
+
+    @staticmethod
     async def _run_reminder(broadcast_id: int, bot: Bot):
-        """
-        Напоминание тем, кто получил рассылку и не нажал реакцию.
-        Тут тоже отправляем карточку мероприятия С КНОПКАМИ.
-        """
         async with SessionLocal() as s:
             b = (await s.execute(select(Broadcast).where(Broadcast.id == broadcast_id))).scalar_one_or_none()
             if not b or b.kind != "event" or not b.event_id:
                 return
-
             event_id = b.event_id
+
             sent_users = select(BroadcastRecipient.user_id).where(
-                BroadcastRecipient.broadcast_id == broadcast_id,
-                BroadcastRecipient.status == "sent"
+                BroadcastRecipient.broadcast_id == broadcast_id, BroadcastRecipient.status == "sent"
             )
             reacted = select(EventReaction.user_id).where(EventReaction.event_id == event_id)
 
-            targets = (
-                await s.execute(
-                    select(User.id, User.tg_id)
-                    .where(
-                        User.id.in_(sent_users),
-                        User.id.not_in(reacted),
-                        User.is_active == True
-                    )
+            targets = (await s.execute(
+                select(User.id, User.tg_id).where(
+                    User.id.in_(sent_users),
+                    User.id.not_in(reacted),
+                    User.is_active == True
                 )
-            ).all()
+            )).all()
 
         text = "Напоминание: если Вам интересно мероприятие, нажмите «✅ Интересно» в карточке события."
 
-        for user_id, tg_id in targets:
+        for _, tg_id in targets:
             try:
                 await bot.send_message(tg_id, text)
                 await BroadcastService._send_event(bot, tg_id, event_id)

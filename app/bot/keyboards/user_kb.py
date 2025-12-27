@@ -1,52 +1,67 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bot.callbacks import EventsListCb, EventViewCb, EventReactCb
+from app.bot.callbacks import EventsListCb, EventViewCb, EventReactCb, EventIcsCb, EventMoreMediaCb
+
+
+BTN_UPCOMING = "📅 Ближайшие мероприятия"
+BTN_INTERESTS = "⭐ Мои интересы"
+BTN_SETTINGS = "⚙️ Настройки"
 
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Грядущие мероприятия")],
-            [KeyboardButton(text="Мои интересы"), KeyboardButton(text="Настройки")],
+            [KeyboardButton(text=BTN_UPCOMING)],
+            [KeyboardButton(text=BTN_INTERESTS)],
+            [KeyboardButton(text=BTN_SETTINGS)],
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
-
-
-def settings_kb(is_subscribed: bool) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    if is_subscribed:
-        b.button(text="🔕 Отписаться от рассылок", callback_data="usr:unsub")
-    else:
-        b.button(text="🔔 Подписаться на рассылки", callback_data="usr:sub")
-    return b.as_markup()
 
 
 def events_list_kb(items: list[tuple[int, str]], page: int, pages: int) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
+    kb = InlineKeyboardBuilder()
+
     for event_id, title in items:
-        b.button(text=title[:40], callback_data=EventViewCb(event_id=event_id).pack())
+        kb.button(text=title, callback_data=EventViewCb(event_id=event_id).pack())
 
-    nav = InlineKeyboardBuilder()
+    nav = []
     if page > 1:
-        nav.button(text="⬅️", callback_data=EventsListCb(page=page - 1).pack())
-    nav.button(text=f"{page}/{pages}", callback_data="noop")
+        nav.append(("⬅️", EventsListCb(page=page - 1).pack()))
+    nav.append((f"{page}/{pages}", "noop"))
     if page < pages:
-        nav.button(text="➡️", callback_data=EventsListCb(page=page + 1).pack())
+        nav.append(("➡️", EventsListCb(page=page + 1).pack()))
 
-    b.adjust(1)
-    nav.adjust(3)
-    return InlineKeyboardMarkup(inline_keyboard=b.export()) if pages == 1 else InlineKeyboardMarkup(
-        inline_keyboard=b.export() + nav.export()
-    )
+    for text, data in nav:
+        kb.button(text=text, callback_data=data)
+
+    kb.adjust(1)
+    if pages > 1:
+        kb.adjust(1, len(nav))
+
+    return kb.as_markup()
 
 
-def event_card_kb(event_id: int) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Интересно", callback_data=EventReactCb(event_id=event_id, reaction="interested").pack())
-    b.button(text="❌ Не интересно", callback_data=EventReactCb(event_id=event_id, reaction="declined").pack())
-    b.button(text="📅 В календарь", callback_data=f"usr:ics:{event_id}")
-    b.button(text="⬅️ Назад к списку", callback_data="usr:back_to_list")
-    b.adjust(2, 2)
-    return b.as_markup()
+def event_card_kb(event_id: int, has_more: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    kb.button(text="✅ Интересно", callback_data=EventReactCb(event_id=event_id, reaction="interested").pack())
+    kb.button(text="❌ Не интересно", callback_data=EventReactCb(event_id=event_id, reaction="declined").pack())
+    kb.button(text="📅 В календарь", callback_data=EventIcsCb(event_id=event_id).pack())
+
+    if has_more:
+        kb.button(text="🖼 Другие фото", callback_data=EventMoreMediaCb(event_id=event_id).pack())
+
+    kb.adjust(2, 1, 1)
+    return kb.as_markup()
+
+
+def settings_kb(is_subscribed: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if is_subscribed:
+        kb.button(text="🔕 Отписаться", callback_data="usr:unsub")
+    else:
+        kb.button(text="🔔 Подписаться", callback_data="usr:sub")
+    kb.adjust(1)
+    return kb.as_markup()

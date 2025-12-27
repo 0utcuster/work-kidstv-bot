@@ -1,4 +1,3 @@
-# app/services/utils.py
 import datetime as dt
 
 
@@ -6,7 +5,7 @@ def parse_dt(s: str) -> dt.datetime:
     """
     Принимает:
       - 'YYYY-MM-DD HH:MM'
-      - 'YYYY-MM-DD'  (тогда ставим 12:00)
+      - 'YYYY-MM-DD'  (тогда ставим 00:00, чтобы "время не показывать")
     """
     s = (s or "").strip()
     if not s:
@@ -16,7 +15,7 @@ def parse_dt(s: str) -> dt.datetime:
         try:
             d = dt.datetime.strptime(s, fmt)
             if fmt == "%Y-%m-%d":
-                d = d.replace(hour=12, minute=0)
+                d = d.replace(hour=0, minute=0)
             return d
         except ValueError:
             pass
